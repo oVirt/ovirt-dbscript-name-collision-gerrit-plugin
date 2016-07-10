@@ -39,7 +39,6 @@ limitations under the License.
           <archive>
             <manifestEntries>
               <Gerrit-PluginName>${project.name}</Gerrit-PluginName>
-              <Gerrit-Module>com.googlesource.gerrit.plugins.testplugin.Module</Gerrit-Module>
               <Gerrit-SshModule>com.googlesource.gerrit.plugins.testplugin.SshModule</Gerrit-SshModule>
               <Gerrit-HttpModule>com.googlesource.gerrit.plugins.testplugin.HttpModule</Gerrit-HttpModule>
 
@@ -61,8 +60,8 @@ limitations under the License.
         <artifactId>maven-compiler-plugin</artifactId>
         <version>2.3.2</version>
         <configuration>
-          <source>1.7</source>
-          <target>1.7</target>
+          <source>1.8</source>
+          <target>1.8</target>
           <encoding>UTF-8</encoding>
         </configuration>
       </plugin>
@@ -75,6 +74,11 @@ limitations under the License.
       <artifactId>gerrit-${Gerrit-ApiType}-api</artifactId>
       <version>${Gerrit-ApiVersion}</version>
       <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.12</version>
     </dependency>
   </dependencies>
 </project>
