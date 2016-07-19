@@ -25,7 +25,7 @@ limitations under the License.
   <name>ovirt-dbscript-name-collision</name>
 
   <properties>
-    <Gerrit-ApiType>plugin</Gerrit-ApiType>
+        <Gerrit-ApiType>plugin</Gerrit-ApiType>
     <Gerrit-ApiVersion>2.12</Gerrit-ApiVersion>
   </properties>
 
@@ -38,16 +38,11 @@ limitations under the License.
         <configuration>
           <archive>
             <manifestEntries>
-              <Gerrit-PluginName>${project.name}</Gerrit-PluginName>
-              <Gerrit-SshModule>com.googlesource.gerrit.plugins.testplugin.SshModule</Gerrit-SshModule>
-              <Gerrit-HttpModule>com.googlesource.gerrit.plugins.testplugin.HttpModule</Gerrit-HttpModule>
-
               <Implementation-Vendor>Red Hat</Implementation-Vendor>
-              <Implementation-URL>https://gerrit.ovirt.org/gerrit-mention-plugin</Implementation-URL>
-
+              <Implementation-URL>https://gerrit.ovirt.org/${project.name}</Implementation-URL>
               <Implementation-Title>${Gerrit-ApiType} ${project.artifactId}</Implementation-Title>
               <Implementation-Version>${project.version}</Implementation-Version>
-
+              <Gerrit-PluginName>${project.name}</Gerrit-PluginName>
               <Gerrit-ApiType>${Gerrit-ApiType}</Gerrit-ApiType>
               <Gerrit-ApiVersion>${Gerrit-ApiVersion}</Gerrit-ApiVersion>
             </manifestEntries>

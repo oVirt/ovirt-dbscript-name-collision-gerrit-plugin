@@ -15,37 +15,26 @@
 package com.googlesource.gerrit.plugins.testplugin;
 
 import com.google.gerrit.extensions.annotations.Listen;
-import com.google.gerrit.reviewdb.client.Branch;
-import com.google.gerrit.reviewdb.client.Change;
-import com.google.gerrit.reviewdb.client.Patch;
-import com.google.gerrit.reviewdb.client.PatchSet;
 import com.google.gerrit.reviewdb.client.Project;
-import com.google.gerrit.server.account.AccountCache;
-import com.google.gerrit.server.config.PluginConfig;
 import com.google.gerrit.server.events.CommitReceivedEvent;
-import com.google.gerrit.server.events.Event;
-import com.google.gerrit.server.events.PatchSetCreatedEvent;
-import com.google.gerrit.server.git.CodeReviewCommit;
 import com.google.gerrit.server.git.GitRepositoryManager;
 import com.google.gerrit.server.git.validators.CommitValidationException;
 import com.google.gerrit.server.git.validators.CommitValidationListener;
 import com.google.gerrit.server.git.validators.CommitValidationMessage;
-import com.google.gerrit.server.git.validators.MergeValidationException;
-import com.google.gerrit.server.git.validators.MergeValidationListener;
-import com.google.gerrit.server.patch.PatchList;
-import com.google.gerrit.server.patch.PatchListCache;
-import com.google.gerrit.server.patch.PatchListNotAvailableException;
-import com.google.gerrit.server.project.ProjectControl;
-import com.google.gerrit.server.project.ProjectState;
 import com.google.inject.Inject;
 import com.google.inject.Singleton;
-import com.google.inject.assistedinject.Assisted;
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
+import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.TreeWalk;
-import org.eclipse.jgit.treewalk.filter.PathFilter;
+import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,143 +43,131 @@ import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Listen
 @Singleton
-public class OvirtPatchSetListener implements CommitValidationListener, MergeValidationListener {
-    private static final String FOLDER_PREFIX = "packaging/dbscript/upgrade";
+public class OvirtPatchSetListener implements CommitValidationListener {
+    private static final String FOLDER_PREFIX = "packaging/dbscripts/upgrade";
     private static final Pattern FILE_PATTERN = Pattern.compile("(\\d{2}_\\d{2}_\\d{4})_\\w+.sql");
     private static final Logger log = LoggerFactory.getLogger(OvirtPatchSetListener.class);
 
     private final GitRepositoryManager manager;
-    private final ProjectControl.Factory factory;
-    private final AccountCache accountCache;
-    private final PluginConfig pluginConfig;
-    private final PatchListCache patchListCache;
-    private final PatchSet patchSet;
-    private final Change change;
 
-    @Inject OvirtPatchSetListener(
-            final GitRepositoryManager manager,
-            final ProjectControl.Factory factory,
-            final AccountCache accountCache,
-            final PluginConfig pluginConfig,
-            final PatchListCache patchListCache,
-            @Assisted  final PatchSet patchSet,
-            @Assisted  final Change change) {
+    @Inject
+    public OvirtPatchSetListener(final GitRepositoryManager manager) {
+        log.info("Loading Ovirt dbscript name-collision detection plugin");
         this.manager = manager;
-        this.factory = factory;
-        this.accountCache = accountCache;
-        this.pluginConfig = pluginConfig;
-        this.patchListCache = patchListCache;
-        this.patchSet = patchSet;
-        this.change = change;
     }
-
-    public void onEvent(Event event) {
-        if (!(event instanceof PatchSetCreatedEvent)) {
-            return;
-        }
-
-
-    }
-
 
     @Override
     public List<CommitValidationMessage> onCommitReceived(CommitReceivedEvent event) throws CommitValidationException {
 
-        // get added files which match prefix
-//        Set<String> files = getAddedDbscripts(event);
-        Set<String> addedFiles = Collections.EMPTY_SET;
-
-    1    try {
-            PatchList patchList = patchListCache.get(change, patchSet);
-            addedFiles = patchList.getPatches().stream()
-                    .filter(e -> e.getChangeType() == Patch.ChangeType.ADDED)
-                    .filter(e -> e.getNewName().startsWith(FOLDER_PREFIX + "*.sql"))
-                    .map(e -> e.getNewName())
-                    .collect(Collectors.toSet());
-        } catch (PatchListNotAvailableException e) {
-            e.printStackTrace();
-        }
+        Set<String> addedFiles = getAddedDbscripts(event);
         Set<String> existingFiles = getExistingDbscripts(event);
 
-        return addedFiles.stream()
-                .map(file -> FILE_PATTERN.matcher(file).group(0))
-                .filter(pattern -> existingFiles.stream().anyMatch(file -> file.startsWith(pattern)))
-                .map(pattern -> new CommitValidationMessage("A db-script with " + pattern + " exists", false))
-                .collect(Collectors.toList());
+        Optional<Matcher> collision = addedFiles.stream()
+                .map(file -> FILE_PATTERN.matcher(file))
+                .filter(matcher -> matcher.matches() && matcher.groupCount() > 0)
+                .filter(matcher -> existingFiles.stream().anyMatch(file -> file.startsWith(matcher.group(1))))
+                .findFirst();
+        if (collision.isPresent()) {
+            throw new CommitValidationException("The file " + collision.get().group() + " index collides with existing file");
+        }
+        return Collections.emptyList();
+    }
+
+    private Set<String> getAddedDbscripts(CommitReceivedEvent event) {
+        try (Repository repository = repoFromProjectKey(event.getProjectNameKey(), manager).get();
+             ObjectReader reader = repository.newObjectReader();
+             RevWalk revWalk = new RevWalk(repository)) {
+
+            CanonicalTreeParser oldTreeIter = new CanonicalTreeParser();
+            oldTreeIter.reset(reader, revWalk.parseCommit(repository.resolve(Constants.HEAD).toObjectId()).getTree());
+            CanonicalTreeParser newTreeIter = new CanonicalTreeParser();
+            newTreeIter.reset(reader, event.commit.getTree());
+
+            // finally get the list of changed files
+            try (Git git = new Git(repository)) {
+                List<DiffEntry> diffs = git.diff()
+                        .setNewTree(newTreeIter)
+                        .setOldTree(oldTreeIter)
+                        .call();
+                return diffs.stream()
+                        .filter(entry -> entry.getChangeType() == DiffEntry.ChangeType.ADD)
+                        .filter(entry -> entry.getNewPath().startsWith(FOLDER_PREFIX))
+                        .map(entry -> Paths.get(entry.getNewPath()).getFileName().toString())
+                        .collect(Collectors.toSet());
+            }
+        } catch (IOException | GitAPIException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private Set<String> getExistingDbscripts(CommitReceivedEvent event) {
         return filesOfCommit(
                 repoFromProjectKey(event.getProjectNameKey(), manager),
-                event.command.getRefName(),
-                FOLDER_PREFIX);
+                getRepositoryRevCommitFunction());
     }
 
-    private Set<String> getAddedDbscripts(CommitReceivedEvent event) {
-        return filesOfCommit(
-                repoFromProjectKey(event.getProjectNameKey(), manager),
-                Constants.HEAD,
-                FOLDER_PREFIX);
-    }
-
-    public static Set<String> filesOfCommit(Supplier<Repository> repoSupplier, String commit, String pathFilter) {
-        Set<String> files = new HashSet<>();
-        try (Repository repository = repoSupplier.get();
-             TreeWalk treeWalk = new TreeWalk(repository);
-             RevWalk revWalk = new RevWalk(repository)) {
-
-            treeWalk.addTree(revWalk.parseTree(repository.resolve(commit)));
-            treeWalk.setFilter(PathFilter.create(pathFilter));
-            treeWalk.setRecursive(true);
-
-            while (treeWalk.next()) {
-                if (treeWalk.getDepth() != 3) {
-                    continue;
-                }
-                files.add(treeWalk.getNameString());
+    private Function<Repository, RevTree> getRepositoryRevCommitFunction() {
+        return repository -> {
+            try (RevWalk revWalk = new RevWalk(repository)) {
+                return revWalk.parseCommit(repository.resolve(Constants.HEAD)).getTree();
+            } catch (IOException e) {
+                log.error("Failed to get HEAD commit of repo {} ", repository, e);
+                throw new IllegalArgumentException("Can't get tree for HEAD of repository");
             }
-        } catch (IOException e1) {
-            e1.printStackTrace();
+        };
+    }
+
+    public static Set<String> filesOfCommit(Supplier<Repository> repoSupplier, Function<Repository, RevTree> treeSupplier) {
+        Set<String> files = new HashSet<>();
+
+        try (Repository repository = repoSupplier.get();
+             TreeWalk treeWalk = new TreeWalk(repository)) {
+
+            treeWalk.addTree(treeSupplier.apply(repository));
+            treeWalk.setRecursive(true);
+            treeWalk.setFilter(TreeFilter.ANY_DIFF);
+            while (treeWalk.next()) {
+                if (treeWalk.getPathString().startsWith(FOLDER_PREFIX)) {
+                    files.add(treeWalk.getNameString());
+                }
+            }
+
+        } catch (Exception e) {
+            log.error("Failed to get files of a commit {} ", treeSupplier, e);
         }
         return files;
     }
 
-        @Override
-    public void onPreMerge(Repository repo,
-            CodeReviewCommit commit,
-            ProjectState destProject,
-            Branch.NameKey destBranch,
-            PatchSet.Id patchSetId) throws MergeValidationException {
-
-    }
-
     public static Supplier<Repository> repoFromPath(String path) {
-        return (Supplier<Repository>) () -> {
+        return () -> {
             try {
                 return new FileRepositoryBuilder()
                         .readEnvironment() // scan environment GIT_* variables
                         .findGitDir(Paths.get(path).toFile())
                         .build();
             } catch (IOException e) {
-                e.printStackTrace();
+                log.error("Failed to open a repo from path {}, ", path, e);
                 throw new IllegalArgumentException(e);
             }
         };
     }
 
-    public static Supplier<Repository> repoFromProjectKey(Project.NameKey project, GitRepositoryManager Manager) {
-        return (Supplier<Repository>) () -> {
+    public static Supplier<Repository> repoFromProjectKey(Project.NameKey project, GitRepositoryManager manager) {
+        return () -> {
             try {
-                return Manager.openRepository(project);
+                return manager.openRepository(project);
             } catch (IOException e) {
-                e.printStackTrace();
+                log.error("Failed to open the repo {} ", project, e);
                 throw new IllegalArgumentException(e);
             }
         };
